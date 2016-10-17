@@ -1,0 +1,337 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Id of the VPC
+  ServiceSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select a default subnet ID.
+  TaskDesiredCapacity:
+    Type: Number
+    Default: '1'
+    Description: Number of containers to launch in your ECS cluster.
+  TaskMemory:
+    Type: Number
+    Default: '512'
+    Description: Reserved memory of the task definition
+  ClusterDesiredCapacity:
+    Type: Number
+    Default: '1'
+    Description: Number of instances to launch in your ECS cluster.
+  ClusterMaxSize:
+    Type: Number
+    Default: '1'
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+  ClusterMaxMemoryReservationPercentage:
+    Type: Number
+    Default: '80'
+    Description: Max allowed percentage of memory reservation before auto scaling gets triggered
+  InstanceType:
+    Description: The EC2 instance type
+    Type: String
+    Default: t2.small
+    AllowedValues:
+    - t2.small
+    ConstraintDescription: You can specify only t2.mirco.
+
+
+Mappings:
+  AWSRegionToAMI:
+    us-east-1:
+      AMIID: ami-55870742
+    us-west-1:
+      AMIID: ami-07713767
+    us-west-2:
+      AMIID: ami-241bd844
+    eu-west-1:
+      AMIID: ami-c74127b4
+    eu-central-1:
+      AMIID: ami-3b54be54
+    ap-northeast-1:
+      AMIID: ami-2b08f44a
+    ap-southeast-1:
+      AMIID: ami-6b61bc08
+    ap-southeast-2:
+      AMIID: ami-d5b59eb6
+
+
+Resources:
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+
+  service:
+    Type: AWS::ECS::Service
+    DependsOn:
+    - ECSAutoScalingGroup
+    Properties:
+      Cluster:
+        Ref: ECSCluster
+      DesiredCount: !Ref TaskDesiredCapacity
+      LoadBalancers:
+      - TargetGroupArn:
+          Ref: TargetGroup
+      # - LoadBalancerName: !Ref Loadbalancer
+        ContainerPort: 80
+        ContainerName: nginx
+      Role:
+        Ref: ECSServiceRole
+      TaskDefinition:
+        Ref: taskdefinition
+
+  taskdefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+      - Name: nginx
+        Cpu: 10
+        Essential: true
+        Image: nginx
+        Memory: !Ref TaskMemory
+        PortMappings:
+        - ContainerPort: 80
+          HostPort: 0
+
+  Loadbalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: 'true'
+      HealthCheck:
+        Target: HTTP:80/
+        HealthyThreshold: '2'
+        UnhealthyThreshold: '3'
+        Interval: '7'
+        Timeout: '5'
+      LoadBalancerName: !Sub ${AWS::StackName}-elb
+      Listeners:
+      - InstancePort: '80'
+        InstanceProtocol: HTTP
+        LoadBalancerPort: '80'
+        Protocol: HTTP
+      # SecurityGroups:
+      # - !Ref LoadbalancerServiceSecurityGroup
+      Subnets: !Ref ServiceSubnets
+
+  loadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        Ref: ServiceSubnets
+      # SecurityGroups:
+      # - Ref: AlbSecurityGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: TargetGroup
+      LoadBalancerArn: 
+        Ref: loadBalancer
+      Port: '80'
+      Protocol: HTTP
+      
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 5
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 3
+      HealthCheckPath: "/"
+      HealthyThresholdCount: 4
+      Matcher:
+        HttpCode: '200'
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 3
+      VpcId:
+        Ref: VpcId
+
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        Ref: ServiceSubnets
+      LaunchConfigurationName:
+        Ref: ContainerInstances
+      MinSize: '1'
+      MaxSize:
+        Ref: ClusterMaxSize
+      DesiredCapacity:
+        Ref: ClusterDesiredCapacity
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '1'
+        MaxBatchSize: '1'
+        PauseTime: PT15M
+        WaitOnResourceSignals: 'true'
+
+  MemoryReservationScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      AutoScalingGroupName:
+        Ref: ECSAutoScalingGroup
+      Cooldown: '300'
+      ScalingAdjustment: '30'
+
+  MemoryReservationHighAlert:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: '1'
+      Statistic: Maximum
+      Threshold: !Ref ClusterMaxMemoryReservationPercentage
+      AlarmDescription: Alarm if CPU too high or metric disappears indicating instance
+        is down
+      Period: '60'
+      AlarmActions:
+      - Ref: MemoryReservationScaleUpPolicy
+      Namespace: AWS/ECS
+      Dimensions:
+      - Name: ClusterName
+        Value:
+          Ref: ECSCluster
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: MemoryReservation
+
+  ContainerInstances:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          commands:
+            01_add_instance_to_cluster:
+              command: !Sub |
+                #!/bin/bash
+                echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: '000400'
+              owner: root
+              group: root
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ContainerInstances.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource ContainerInstances --region ${AWS::Region}
+                runas=root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                - "/etc/cfn/cfn-hup.conf"
+                - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - AWSRegionToAMI
+        - Ref: AWS::Region
+        - AMIID
+      InstanceType:
+        Ref: InstanceType
+      IamInstanceProfile:
+        Ref: EC2InstanceProfile
+      KeyName:
+        Ref: KeyName
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource ContainerInstances --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+
+
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - elasticloadbalancing:Describe*
+            - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+            - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+            - elasticloadbalancing:DeregisterTargets
+            - elasticloadbalancing:RegisterTargets
+            - ec2:Describe*
+            - ec2:AuthorizeSecurityGroupIngress
+            Resource: "*"
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecs:CreateCluster
+            - ecs:DeregisterContainerInstance
+            - ecs:DiscoverPollEndpoint
+            - ecs:Poll
+            - ecs:RegisterContainerInstance
+            - ecs:StartTelemetrySession
+            - ecs:Submit*
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: "*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: EC2Role
+
+
+Outputs:
+
+  ecsservice:
+    Value:
+      Ref: service
+
+  ecscluster:
+    Value:
+      Ref: ECSCluster
+
+  taskdef:
+    Value:
+      Ref: taskdefinition

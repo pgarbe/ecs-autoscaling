@@ -1,0 +1,38 @@
+require 'rubygems'
+require 'bundler/setup'
+require 'autostacker24'
+require 'base64'
+
+Aws.use_bundled_cert!
+ 
+STACK         = 'ecs-autoscaling'
+GLOBAL        = ENV['GLOBAL'] || 'global'
+TEMPLATE      = 'stack.yaml'
+
+desc 'create or update stack'
+task :deploy do
+
+  parameters = {
+      KeyName: 'pgarbe',
+      ClusterDesiredCapacity: 1,
+      ClusterMaxSize: 100,
+      ClusterMaxMemoryReservationPercentage: 80,
+      TaskDesiredCapacity: 1,
+      TaskMemory: 512,
+  }
+  Stacker.create_or_update_stack(STACK, TEMPLATE, parameters, GLOBAL)
+
+end
+
+desc 'delete stack'
+task :delete do
+  Stacker.delete_stack(STACK) unless Stacker.find_stack(STACK).nil?
+end
+
+
+task :default do
+  puts
+  puts 'Use one of the available tasks:'
+  puts "Current stack is #{STACK}\n"
+  system 'rake -T'
+end
