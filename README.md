@@ -1,7 +1,7 @@
 # ECS AutoScaling Examples
 AutoScaling ECS cluster
 
-This repo contains a CloudFormation stack which creates an ECS cluster with a running nginx service. The following parameters can be adjusted in order to test the autoscaling behavior.
+This repo contains a CloudFormation stack which creates an ECS cluster with a running nginx service. The following [parameters](https://github.com/pgarbe/ecs-autoscaling/blob/master/rakefile#L15) can be adjusted in order to test the autoscaling behavior.
 
 ```
   ClusterDesiredCapacity: 1,                  # The number of container instances which should be started
