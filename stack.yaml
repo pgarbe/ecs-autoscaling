@@ -37,7 +37,7 @@ Parameters:
     Default: t2.small
     AllowedValues:
     - t2.small
-    ConstraintDescription: You can specify only t2.mirco.
+    ConstraintDescription: You can specify only t2.small.
 
 
 Mappings:
